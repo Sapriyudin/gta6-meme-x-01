@@ -1,122 +1,122 @@
-#!/usr/bin/env python3
-"""Regenerate meme.png (v2) for the make.fun bounty gta6-meme-x-01.
+"""gta6-meme-x-01 — meme v3.
 
-"PAID" — a parody of GTA's iconic WASTED death screen, drawn from
-scratch. No recycled template, no AI imagery. Black and moody: the
-make.fun ghost stands large above the word PAID, holding its magenta
-star coin — it is the one paying. First person, professional voice:
-
-    My AI agent memed GTA VI. make.fun paid for it.
-
-Run:  python3 gen_meme.py   ->  writes meme.png (1200x1200) here.
+Base: GTA VI key art (keyart.jpg, provided by bosku), 650x366.
+v3 edits, all by this script (Python + PIL):
+  1. Rockstar logo (yellow R* box, bottom-right) removed by diffusion
+     inpainting from the surrounding building facade — no trace left.
+  2. make.fun ghost pasted onto the car hood, in the scene, near the
+     characters. Faces, title and the VI logo are untouched.
+  3. Two-line English caption, bottom-left, white DejaVuSans-Bold
+     with a black outline: "My AI agent got paid / to meme this."
+Deterministic: same input files -> same output bytes (fixed RNG seed).
+Run: python3 gen_meme.py   (writes meme.png in the repo root)
 """
-
+import numpy as np
+from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-SIZE = 1200
-ANTON = "assets/Anton-Regular.ttf"
-GHOST = "assets/ghost.png"
+ROOT = Path(__file__).resolve().parent
+BASE = ROOT / "keyart.jpg"
+GHOST = ROOT / "assets" / "ghost.png"
+OUT = ROOT / "meme.png"
+INTERMEDIATE = Path("/tmp/v3-inpaint-only.png")
 DEJAVU_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-LIBERATION_BOLD = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
 
-MAGENTA = (233, 30, 99)          # make.fun magenta, for the rule + dot
-PAID_FILL = (217, 217, 217)      # WASTED-style light grey
-WHITE = (242, 242, 242)
+# Rockstar logo: tight yellow bbox x608-641 y327-357, black border around
+# it. Mask generously (a few px margin) so no border or yellow survives.
+MASK = (602, 321, 647, 363)  # x0, y0, x1, y1 (exclusive)
 
+GHOST_POS = (64, 232)  # top-left; sits on the car hood, near the characters
+GHOST_SIZE = 88
 
-def load_bold(size):
-    """A clean sans bold for the sub-line and the wordmark."""
-    for path in (DEJAVU_BOLD, LIBERATION_BOLD):
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
-            continue
-    return ImageFont.load_default(size)
+CAPTION_LINES = ["My AI agent got paid", "to meme this."]
+CAPTION_X = 16
+CAPTION_MAX_RIGHT = 226  # keep clear of the VI logo (starts ~x230)
+CAPTION_BOTTOM = 364     # bottom edge of the last line
+CAPTION_GAP = 3
 
 
-def fit_anton(draw, text, target_width, start=200, ceiling=420):
-    """Grow Anton until the text spans about target_width pixels."""
-    size = start
-    while size < ceiling:
-        font = ImageFont.truetype(ANTON, size)
-        if draw.textlength(text, font=font) >= target_width:
-            return font
-        size += 5
-    return ImageFont.truetype(ANTON, ceiling)
+def inpaint_logo(img):
+    """Fill the logo box by diffusion from the surrounding facade."""
+    a = np.array(img).astype(np.float64)
+    h, w, _ = a.shape
+    x0, y0, x1, y1 = MASK
+    mask = np.zeros((h, w), dtype=bool)
+    mask[y0:y1, x0:x1] = True
+    # Seed masked pixels with the mean colour of the fixed border ring
+    # (top row + left column; the box touches the right/bottom edges).
+    ring = [a[y0 - 1, x] for x in range(x0, x1)]
+    ring += [a[y, x0 - 1] for y in range(y0, y1)]
+    filled = a.copy()
+    filled[mask] = np.mean(ring, axis=0)
+    # Diffusion: each masked pixel becomes the mean of its 4 neighbours.
+    # Edge-padded so the image border never wraps around.
+    for _ in range(800):
+        p = np.pad(filled, ((1, 1), (1, 1), (0, 0)), mode="edge")
+        avg = (p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]) / 4.0
+        filled[mask] = avg[mask]
+    # Match the JPEG grain so the patch is not suspiciously smooth.
+    rng = np.random.default_rng(7)
+    filled[mask] = np.clip(
+        filled[mask] + rng.normal(0, 2.0, size=filled[mask].shape), 0, 255
+    )
+    # Feather the mask edge so no hard seam shows.
+    m = Image.fromarray((mask * 255).astype(np.uint8)).filter(
+        ImageFilter.GaussianBlur(1.2)
+    )
+    mf = np.array(m).astype(np.float64)[..., None] / 255.0
+    out = a * (1.0 - mf) + filled * mf
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
 
 
-def vertical_gradient(size, top, bottom):
-    """A top-to-bottom gradient image, built one row at a time."""
-    base = Image.new("RGB", (1, size))
-    px = base.load()
-    for y in range(size):
-        t = y / max(size - 1, 1)
-        px[0, y] = tuple(round(top[i] + (bottom[i] - top[i]) * t) for i in range(3))
-    return base.resize((size, size))
+def add_ghost(img):
+    ghost = Image.open(GHOST).convert("RGBA")
+    ghost = ghost.resize((GHOST_SIZE, GHOST_SIZE), Image.LANCZOS)
+    img.paste(ghost, GHOST_POS, ghost)
+    return img
 
 
-def soft_glow(size, centre, radius, colour, blur):
-    """A blurred disc of light on black, returned as an RGB image."""
-    mask = Image.new("L", (size, size), 0)
-    d = ImageDraw.Draw(mask)
-    cx, cy = centre
-    d.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=70)
-    mask = mask.filter(ImageFilter.GaussianBlur(blur))
-    solid = Image.new("RGB", (size, size), colour)
-    out = Image.new("RGB", (size, size), (0, 0, 0))
-    out.paste(solid, (0, 0), mask)
-    return out
+def add_caption(img):
+    draw = ImageDraw.Draw(img)
+    # Largest size whose longest line still clears the VI logo.
+    size = 20
+    while size > 15:
+        font = ImageFont.truetype(DEJAVU_BOLD, size)
+        widths = []
+        for t in CAPTION_LINES:
+            box = draw.textbbox((0, 0), t, font=font, stroke_width=2)
+            widths.append(box[2] - box[0])
+        if max(widths) <= CAPTION_MAX_RIGHT - CAPTION_X:
+            break
+        size -= 1
+    font = ImageFont.truetype(DEJAVU_BOLD, size)
+    heights = []
+    for line in CAPTION_LINES:
+        box = draw.textbbox((0, 0), line, font=font, stroke_width=2)
+        heights.append(box[3] - box[1])
+    # Anchor the block to the bottom edge, lines stacked upward.
+    y = CAPTION_BOTTOM
+    for line, hgt in reversed(list(zip(CAPTION_LINES, heights))):
+        y -= hgt
+        draw.text(
+            (CAPTION_X, y), line, font=font,
+            fill=(255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0),
+        )
+        y -= CAPTION_GAP
+    print(f"caption font size: {size}")
+    return img
 
 
 def main():
-    # 1. Moody black background: near-black gradient + a soft glow
-    #    behind the ghost and the headline, WASTED-screen style.
-    img = vertical_gradient(SIZE, (14, 14, 14), (0, 0, 0))
-    glow = soft_glow(SIZE, (SIZE // 2, 480), 520, (38, 38, 38), 180)
-    img = Image.blend(img, glow, 0.85)
-    draw = ImageDraw.Draw(img)
-
-    # 2. The ghost, large and central: it is the one paying.
-    ghost = Image.open(GHOST).convert("RGBA")
-    ghost = ghost.resize((380, 380), Image.LANCZOS)
-    img.paste(ghost, (SIZE // 2 - 190, 85), ghost)
-    draw = ImageDraw.Draw(img)
-
-    # 3. PAID, huge, WASTED style: light grey Anton, dark outline.
-    #    Anton at this size is ~355px tall, so it must start high
-    #    enough to clear the sub-line below it.
-    paid_font = fit_anton(draw, "PAID", 1020)
-    # A faint dark-grey offset copy first, so the letters lift off black.
-    draw.text((SIZE // 2 + 5, 500), "PAID", font=paid_font,
-              fill=(48, 48, 48), anchor="mt")
-    draw.text((SIZE // 2, 495), "PAID", font=paid_font, fill=PAID_FILL,
-              stroke_width=9, stroke_fill=(0, 0, 0), anchor="mt")
-
-    # 4. A short magenta rule under the headline.
-    draw.rectangle([SIZE // 2 - 65, 890, SIZE // 2 + 65, 895], fill=MAGENTA)
-
-    # 5. The sub-line, clean type, two lines, centred.
-    sub_font = load_bold(54)
-    for i, line in enumerate(("My AI agent memed GTA VI.",
-                             "make.fun paid for it.")):
-        while draw.textlength(line, font=sub_font) > 1060 and sub_font.size > 30:
-            sub_font = load_bold(sub_font.size - 2)
-        draw.text((SIZE // 2, 920 + i * 68), line, font=sub_font,
-                  fill=WHITE, anchor="mt")
-
-    # 6. The wordmark at the bottom: make.fun, dot in magenta.
-    mark_font = load_bold(46)
-    w_make = draw.textlength("make", font=mark_font)
-    w_dot = draw.textlength(".", font=mark_font)
-    w_fun = draw.textlength("fun", font=mark_font)
-    x = SIZE // 2 - (w_make + w_dot + w_fun) / 2
-    y = 1115
-    draw.text((x, y), "make", font=mark_font, fill=WHITE)
-    draw.text((x + w_make, y), ".", font=mark_font, fill=MAGENTA)
-    draw.text((x + w_make + w_dot, y), "fun", font=mark_font, fill=WHITE)
-
-    img.save("meme.png")
-    print("wrote meme.png", img.size)
+    img = Image.open(BASE).convert("RGB")
+    print(f"base: {img.size} {img.mode}")
+    img = inpaint_logo(img)
+    img.save(INTERMEDIATE)
+    print(f"saved intermediate (logo removed only): {INTERMEDIATE}")
+    img = add_ghost(img)
+    img = add_caption(img)
+    img.save(OUT)
+    print(f"saved {OUT} {img.size}")
 
 
 if __name__ == "__main__":
