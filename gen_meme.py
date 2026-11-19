@@ -1,98 +1,122 @@
 #!/usr/bin/env python3
-"""Build the GTA 6 meme for the make.fun bounty gta6-meme-x-01.
+"""Regenerate meme.png (v2) for the make.fun bounty gta6-meme-x-01.
 
-Classic Drake format, captioned the way a human would caption it:
-white Anton caps with a black outline, no AI-generated imagery.
-The joke is in Indonesian, the way bosku talks:
+"PAID" — a parody of GTA's iconic WASTED death screen, drawn from
+scratch. No recycled template, no AI imagery. Black and moody: the
+make.fun ghost stands large above the word PAID, holding its magenta
+star coin — it is the one paying. First person, professional voice:
 
-  top panel (Drake waving it away):  NUNGGU GTA VI / 13 TAHUN
-  bottom panel (Drake pointing, approving): DIBAYAR BUAT / NGE-MEME GTA VI / DI MAKE.FUN
+    My AI agent memed GTA VI. make.fun paid for it.
 
-make.fun's ghost is worked into the bottom panel scene itself: it
-stands right beside Drake, where Drake is pointing, big enough to
-recognise when the picture is shrunk to 480x480.
-
-Inputs live in assets/ next to this script. Run it from the repo root:
-    python3 gen_meme.py
-It writes meme.png (1200x1200) in the repo root.
+Run:  python3 gen_meme.py   ->  writes meme.png (1200x1200) here.
 """
 
-from pathlib import Path
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-from PIL import Image, ImageDraw, ImageFont
+SIZE = 1200
+ANTON = "assets/Anton-Regular.ttf"
+GHOST = "assets/ghost.png"
+DEJAVU_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+LIBERATION_BOLD = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
 
-HERE = Path(__file__).resolve().parent
-ASSETS = HERE / "assets"
-
-DRAKE = ASSETS / "drake.jpg"
-GHOST = ASSETS / "ghost.png"
-FONT = ASSETS / "Anton-Regular.ttf"
-
-OUT = HERE / "meme.png"
-
-# The Drake template is 1200x1200: Drake on the left half, blank white
-# on the right half. Top panel 0..600 (rejecting), bottom 600..1200
-# (approving, pointing right).
-TOP_LINES = ["NUNGGU GTA VI", "13 TAHUN"]
-BOTTOM_LINES = ["DIBAYAR BUAT", "NGE-MEME GTA VI", "DI MAKE.FUN"]
-
-TOP_BOX = (620, 1180)      # x range for the top caption
-BOTTOM_BOX = (860, 1185)   # x range for the bottom caption
-GHOST_BOX = (615, 790, 220)  # x, y, size of the ghost in the bottom panel
+MAGENTA = (233, 30, 99)          # make.fun magenta, for the rule + dot
+PAID_FILL = (217, 217, 217)      # WASTED-style light grey
+WHITE = (242, 242, 242)
 
 
-def fit_font(draw, lines, box_width, max_size):
-    """Biggest Anton size whose longest line still fits the box."""
-    size = max_size
-    while size > 10:
-        font = ImageFont.truetype(str(FONT), size)
-        stroke = max(3, size // 12)
-        widths = [draw.textlength(line, font=font) + 2 * stroke for line in lines]
-        if max(widths) <= box_width:
-            return font, stroke
-        size -= 2
-    font = ImageFont.truetype(str(FONT), 10)
-    return font, 3
+def load_bold(size):
+    """A clean sans bold for the sub-line and the wordmark."""
+    for path in (DEJAVU_BOLD, LIBERATION_BOLD):
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return ImageFont.load_default(size)
 
 
-def draw_caption(draw, lines, box, centre_y, max_size):
-    """Draw centred white-on-black-outline caption lines in the box."""
-    x0, x1 = box
-    box_width = x1 - x0
-    centre_x = (x0 + x1) // 2
-    font, stroke = fit_font(draw, lines, box_width, max_size)
-    line_height = int(font.size * 1.15)
-    total = line_height * len(lines)
-    y = centre_y - total // 2
-    for line in lines:
-        draw.text(
-            (centre_x, y + line_height // 2),
-            line,
-            font=font,
-            fill="white",
-            stroke_width=stroke,
-            stroke_fill="black",
-            anchor="mm",
-        )
-        y += line_height
-    return font.size
+def fit_anton(draw, text, target_width, start=200, ceiling=420):
+    """Grow Anton until the text spans about target_width pixels."""
+    size = start
+    while size < ceiling:
+        font = ImageFont.truetype(ANTON, size)
+        if draw.textlength(text, font=font) >= target_width:
+            return font
+        size += 5
+    return ImageFont.truetype(ANTON, ceiling)
+
+
+def vertical_gradient(size, top, bottom):
+    """A top-to-bottom gradient image, built one row at a time."""
+    base = Image.new("RGB", (1, size))
+    px = base.load()
+    for y in range(size):
+        t = y / max(size - 1, 1)
+        px[0, y] = tuple(round(top[i] + (bottom[i] - top[i]) * t) for i in range(3))
+    return base.resize((size, size))
+
+
+def soft_glow(size, centre, radius, colour, blur):
+    """A blurred disc of light on black, returned as an RGB image."""
+    mask = Image.new("L", (size, size), 0)
+    d = ImageDraw.Draw(mask)
+    cx, cy = centre
+    d.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=70)
+    mask = mask.filter(ImageFilter.GaussianBlur(blur))
+    solid = Image.new("RGB", (size, size), colour)
+    out = Image.new("RGB", (size, size), (0, 0, 0))
+    out.paste(solid, (0, 0), mask)
+    return out
 
 
 def main():
-    base = Image.open(DRAKE).convert("RGB")
-    draw = ImageDraw.Draw(base)
+    # 1. Moody black background: near-black gradient + a soft glow
+    #    behind the ghost and the headline, WASTED-screen style.
+    img = vertical_gradient(SIZE, (14, 14, 14), (0, 0, 0))
+    glow = soft_glow(SIZE, (SIZE // 2, 480), 520, (38, 38, 38), 180)
+    img = Image.blend(img, glow, 0.85)
+    draw = ImageDraw.Draw(img)
 
-    top_size = draw_caption(draw, TOP_LINES, TOP_BOX, 300, 84)
-    bottom_size = draw_caption(draw, BOTTOM_LINES, BOTTOM_BOX, 900, 56)
-
+    # 2. The ghost, large and central: it is the one paying.
     ghost = Image.open(GHOST).convert("RGBA")
-    gx, gy, gsize = GHOST_BOX
-    ghost = ghost.resize((gsize, gsize), Image.LANCZOS)
-    base.paste(ghost, (gx, gy), ghost)
+    ghost = ghost.resize((380, 380), Image.LANCZOS)
+    img.paste(ghost, (SIZE // 2 - 190, 85), ghost)
+    draw = ImageDraw.Draw(img)
 
-    base.save(OUT, "PNG", optimize=True)
-    print(f"wrote {OUT} ({base.size[0]}x{base.size[1]})")
-    print(f"top font {top_size}px, bottom font {bottom_size}px, ghost {gsize}px")
+    # 3. PAID, huge, WASTED style: light grey Anton, dark outline.
+    #    Anton at this size is ~355px tall, so it must start high
+    #    enough to clear the sub-line below it.
+    paid_font = fit_anton(draw, "PAID", 1020)
+    # A faint dark-grey offset copy first, so the letters lift off black.
+    draw.text((SIZE // 2 + 5, 500), "PAID", font=paid_font,
+              fill=(48, 48, 48), anchor="mt")
+    draw.text((SIZE // 2, 495), "PAID", font=paid_font, fill=PAID_FILL,
+              stroke_width=9, stroke_fill=(0, 0, 0), anchor="mt")
+
+    # 4. A short magenta rule under the headline.
+    draw.rectangle([SIZE // 2 - 65, 890, SIZE // 2 + 65, 895], fill=MAGENTA)
+
+    # 5. The sub-line, clean type, two lines, centred.
+    sub_font = load_bold(54)
+    for i, line in enumerate(("My AI agent memed GTA VI.",
+                             "make.fun paid for it.")):
+        while draw.textlength(line, font=sub_font) > 1060 and sub_font.size > 30:
+            sub_font = load_bold(sub_font.size - 2)
+        draw.text((SIZE // 2, 920 + i * 68), line, font=sub_font,
+                  fill=WHITE, anchor="mt")
+
+    # 6. The wordmark at the bottom: make.fun, dot in magenta.
+    mark_font = load_bold(46)
+    w_make = draw.textlength("make", font=mark_font)
+    w_dot = draw.textlength(".", font=mark_font)
+    w_fun = draw.textlength("fun", font=mark_font)
+    x = SIZE // 2 - (w_make + w_dot + w_fun) / 2
+    y = 1115
+    draw.text((x, y), "make", font=mark_font, fill=WHITE)
+    draw.text((x + w_make, y), ".", font=mark_font, fill=MAGENTA)
+    draw.text((x + w_make + w_dot, y), "fun", font=mark_font, fill=WHITE)
+
+    img.save("meme.png")
+    print("wrote meme.png", img.size)
 
 
 if __name__ == "__main__":
